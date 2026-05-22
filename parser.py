@@ -6,7 +6,7 @@ from typing import Optional
 
 from models import MatchListing, MoveEvent, ParsedResult, normalize_color
 
-MATCH_ID_RE = re.compile(r"\.(\d{3,})")
+MATCH_ID_RE = re.compile(r"(?<!\d)\.(\d+(?:\.\d+)?)\b")
 GGF_TOKEN_RE = re.compile(r"([A-Z]{1,2})\[([^\]]*)\]")
 COORD_RE = re.compile(r"^[A-Ha-h][1-8]$")
 SIDE_TO_MOVE_RE = re.compile(
@@ -24,6 +24,33 @@ PLAYER_PAIR_PATTERNS = (
     ),
 )
 GAME_TYPE_RE = re.compile(r"\b([a-z][a-z0-9]*\d+(?:r\d+)?)\b", re.IGNORECASE)
+MATCH_ROW_RE = re.compile(
+    r"^\|\s*\.(?P<id>\d+)\s+\d+\s+(?P<black>[A-Za-z0-9_+\-]+)\s+"
+    r"\d+\s+(?P<white>[A-Za-z0-9_+\-]+)\s+(?P<game>[a-z][a-z0-9]*\d+(?:r\d+)?)\b",
+    re.IGNORECASE,
+)
+JOIN_UPDATE_RE = re.compile(
+    r"^/os:\s*(?P<kind>join|update)\s+\.(?P<id>\d+(?:\.\d+)?)\s+"
+    r"(?P<game>[a-z][a-z0-9]*\d+(?:r\d+)?)",
+    re.IGNORECASE,
+)
+END_RE = re.compile(
+    r"^/os:\s*end\s+\.(?P<id>\d+(?:\.\d+)?)\s+\(\s*"
+    r"(?P<black>[A-Za-z0-9_+\-]+)\s+vs\.?\s+(?P<white>[A-Za-z0-9_+\-]+)\s*"
+    r"\)\s+(?P<result>[+-]?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+MATCH_CLOSED_RE = re.compile(r"^/os:\s*-\s*match\s+\.(?P<id>\d+)\b", re.IGNORECASE)
+MOVE_ROW_RE = re.compile(
+    r"^\|\s*(?P<ply>\d+)\s*:\s*(?P<move>[A-Za-z0-9]+)(?:/.*)?$",
+    re.IGNORECASE,
+)
+MOVE_COUNT_RE = re.compile(r"^\|\s*(?P<count>\d+)\s+move\(s\)\s*$", re.IGNORECASE)
+STONE_TO_MOVE_RE = re.compile(r"^\|\s*([*OoXx])\s*to move\b")
+PLAYER_STATUS_RE = re.compile(
+    r"^\|\s*(?P<name>[A-Za-z0-9_+\-]+)\s+\([^)]*\s(?P<stone>[*OoXx])\)\s",
+    re.IGNORECASE,
+)
 PLAIN_RESULT_KEYWORDS = {
     "resign": {"r", "resign"},
     "resigned": {"r", "resign"},
@@ -47,6 +74,14 @@ class ParsedLine:
     result: Optional[ParsedResult] = None
     warnings: list[str] = field(default_factory=list)
     snapshot_like: bool = False
+    context_match_id: Optional[str] = None
+    context_kind: Optional[str] = None
+    closed_match_id: Optional[str] = None
+    board_row_index: Optional[int] = None
+    board_row_8: Optional[str] = None
+    move_count_hint: Optional[int] = None
+    player_name: Optional[str] = None
+    player_color: Optional[str] = None
 
 
 def normalize_match_id(match_id: str) -> str:
@@ -125,6 +160,53 @@ def _move_from_token(tag: str, content: str) -> Optional[MoveEvent]:
     return None
 
 
+def _normalize_cell(cell: str) -> Optional[str]:
+    if cell in {"X", "x", "*"}:
+        return "X"
+    if cell in {"O", "o"}:
+        return "O"
+    if cell in {"-", "."}:
+        return "-"
+    return None
+
+
+def _parse_board_row(line: str) -> tuple[int, str] | None:
+    parts = line.strip().split()
+    # Example: | 1 - - - - - - - - 1
+    if len(parts) != 11:
+        return None
+    if parts[0] != "|":
+        return None
+    if parts[1] not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
+        return None
+    if parts[-1] != parts[1]:
+        return None
+    cells = []
+    for token in parts[2:10]:
+        normalized = _normalize_cell(token)
+        if not normalized:
+            return None
+        cells.append(normalized)
+    return int(parts[1]), "".join(cells)
+
+
+def _parse_update_move(line: str) -> MoveEvent | None:
+    found = MOVE_ROW_RE.search(line)
+    if not found:
+        return None
+    ply = int(found.group("ply"))
+    token = found.group("move").strip()
+    if ply <= 0:
+        return None
+    token_upper = token.upper()
+    if token_upper in {"PA", "PASS"}:
+        return MoveEvent(move="pass", source="update", ply=ply)
+    token_lower = token.lower()
+    if COORD_RE.fullmatch(token_lower):
+        return MoveEvent(move=token_lower, source="update", ply=ply)
+    return None
+
+
 def _extract_game_type(text: str) -> Optional[str]:
     for match in GAME_TYPE_RE.findall(text):
         token = match.lower()
@@ -147,21 +229,83 @@ def parse_stream_line(line: str) -> ParsedLine:
     parsed.match_ids = extract_match_ids(line)
     parsed.game_type = _extract_game_type(line)
 
+    joined = JOIN_UPDATE_RE.search(line)
+    if joined:
+        match_id = normalize_match_id(joined.group("id"))
+        parsed.context_match_id = match_id
+        parsed.context_kind = joined.group("kind").lower()
+        parsed.match_ids.add(match_id)
+        parsed.game_type = joined.group("game").lower()
+
+    ended = END_RE.search(line)
+    if ended:
+        match_id = normalize_match_id(ended.group("id"))
+        parsed.context_match_id = match_id
+        parsed.context_kind = "end"
+        parsed.match_ids.add(match_id)
+        parsed.listings.append(
+            MatchListing(
+                match_id=match_id,
+                black_player=ended.group("black"),
+                white_player=ended.group("white"),
+            )
+        )
+        parsed.result = _parse_result_token(ended.group("result"))
+
+    closed = MATCH_CLOSED_RE.search(line)
+    if closed:
+        parsed.closed_match_id = normalize_match_id(closed.group("id"))
+
     side = SIDE_TO_MOVE_RE.search(line)
     if side:
         parsed.initial_turn = normalize_color(side.group(1))
+    else:
+        stone = STONE_TO_MOVE_RE.search(line.strip())
+        if stone:
+            parsed.initial_turn = "black" if stone.group(1) in {"*", "X", "x"} else "white"
 
-    black_player, white_player = _extract_players(line)
-    if parsed.match_ids and (black_player or white_player or parsed.game_type):
-        for match_id in parsed.match_ids:
-            parsed.listings.append(
-                MatchListing(
-                    match_id=match_id,
-                    black_player=black_player,
-                    white_player=white_player,
-                    game_type=parsed.game_type,
-                )
+    row = MATCH_ROW_RE.search(line)
+    if row:
+        match_id = normalize_match_id(row.group("id"))
+        parsed.match_ids.add(match_id)
+        parsed.listings.append(
+            MatchListing(
+                match_id=match_id,
+                black_player=row.group("black"),
+                white_player=row.group("white"),
+                game_type=row.group("game").lower(),
             )
+        )
+    else:
+        black_player, white_player = _extract_players(line)
+        if parsed.match_ids and (black_player or white_player or parsed.game_type):
+            for match_id in parsed.match_ids:
+                parsed.listings.append(
+                    MatchListing(
+                        match_id=match_id,
+                        black_player=black_player,
+                        white_player=white_player,
+                        game_type=parsed.game_type,
+                    )
+                )
+
+    count = MOVE_COUNT_RE.search(line)
+    if count:
+        parsed.move_count_hint = int(count.group("count"))
+
+    update_move = _parse_update_move(line)
+    if update_move:
+        parsed.moves.append(update_move)
+
+    board_row = _parse_board_row(line)
+    if board_row:
+        parsed.board_row_index, parsed.board_row_8 = board_row
+
+    player_row = PLAYER_STATUS_RE.search(line)
+    if player_row:
+        parsed.player_name = player_row.group("name")
+        stone = player_row.group("stone")
+        parsed.player_color = "black" if stone in {"*", "X", "x"} else "white"
 
     tokens = GGF_TOKEN_RE.findall(line)
     if tokens:

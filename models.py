@@ -26,6 +26,7 @@ class MoveEvent:
     color: Optional[str] = None
     source: str = "stream"
     raw: str = ""
+    ply: Optional[int] = None
 
     def normalized(self) -> "MoveEvent":
         return MoveEvent(
@@ -33,6 +34,7 @@ class MoveEvent:
             color=normalize_color(self.color),
             source=self.source,
             raw=self.raw,
+            ply=self.ply,
         )
 
 
@@ -96,6 +98,10 @@ class MatchState:
 
     @property
     def moves(self) -> list[str]:
+        with_ply = all(event.ply is not None for event in self.move_events)
+        if with_ply:
+            ordered = sorted(self.move_events, key=lambda event: event.ply or 0)
+            return [event.move for event in ordered]
         return [event.move for event in self.move_events]
 
     @property
@@ -131,6 +137,23 @@ class MatchState:
 
     def append_live_move(self, event: MoveEvent) -> bool:
         normalized = event.normalized()
+        if normalized.ply is not None:
+            for existing in self.move_events:
+                if existing.ply != normalized.ply:
+                    continue
+                existing_norm = existing.normalized()
+                same_color = (
+                    existing_norm.color == normalized.color
+                    or existing_norm.color is None
+                    or normalized.color is None
+                )
+                if existing_norm.move == normalized.move and same_color:
+                    return False
+                self.add_warning(
+                    f"conflicting move at ply {normalized.ply}: "
+                    f"existing={existing_norm.move} incoming={normalized.move}"
+                )
+                return False
         if self.move_events:
             prev = self.move_events[-1].normalized()
             if prev.move == normalized.move and prev.color == normalized.color:
@@ -171,4 +194,3 @@ class MatchState:
         if result:
             self.parsed_result = result
             self.result_from_ggs = result.raw
-

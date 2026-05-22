@@ -47,6 +47,10 @@ class Collector:
         self.matches: dict[str, MatchState] = {}
         self.watching_ids: set[str] = set()
         self.requested_watch_ids: set[str] = set()
+        self.current_context_match_id: Optional[str] = None
+        self.board_buffers: dict[str, dict[int, str]] = {}
+        self.join_capture_needs_initial: set[str] = set()
+        self.join_capture_saw_move_row: set[str] = set()
 
         self.stop_event = asyncio.Event()
         self.first_match_poll_done = False
@@ -155,6 +159,13 @@ class Collector:
 
     async def _handle_line(self, line: str) -> None:
         parsed = parse_stream_line(line)
+        if parsed.context_match_id:
+            self.current_context_match_id = parsed.context_match_id
+            if parsed.context_kind == "join":
+                self.join_capture_needs_initial.add(parsed.context_match_id)
+                self.join_capture_saw_move_row.discard(parsed.context_match_id)
+                self.board_buffers.pop(parsed.context_match_id, None)
+
         for listing in parsed.listings:
             state = self._get_or_create_match(listing.match_id)
             state.update_identity(
@@ -168,6 +179,20 @@ class Collector:
                 await self._watch_match_if_needed(match_id)
 
         target_ids = set(parsed.match_ids)
+        if parsed.context_match_id:
+            target_ids.add(parsed.context_match_id)
+
+        has_context_sensitive_payload = any(
+            [
+                bool(parsed.moves),
+                bool(parsed.initial_board_64),
+                bool(parsed.initial_turn),
+                parsed.board_row_index is not None,
+                parsed.move_count_hint is not None,
+            ]
+        )
+        if not target_ids and has_context_sensitive_payload and self.current_context_match_id:
+            target_ids.add(self.current_context_match_id)
         if not target_ids and (parsed.moves or parsed.initial_board_64) and len(self.watching_ids) == 1:
             only = next(iter(self.watching_ids))
             target_ids.add(only)
@@ -182,6 +207,28 @@ class Collector:
             elif parsed.initial_turn and not state.initial_turn:
                 state.initial_turn = parsed.initial_turn
 
+            if parsed.player_name and parsed.player_color:
+                if parsed.player_color == "black":
+                    state.black_player = parsed.player_name
+                elif parsed.player_color == "white":
+                    state.white_player = parsed.player_name
+
+            if parsed.board_row_index is not None and parsed.board_row_8 is not None:
+                rows = self.board_buffers.setdefault(match_id, {})
+                rows[parsed.board_row_index] = parsed.board_row_8
+                if len(rows) == 8:
+                    board64 = "".join(rows[row_no] for row_no in range(1, 9))
+                    should_capture_initial = (
+                        match_id in self.join_capture_needs_initial
+                        and match_id not in self.join_capture_saw_move_row
+                        and not state.initial_board_64
+                    )
+                    if should_capture_initial:
+                        state.set_initial_position(board64, state.initial_turn or parsed.initial_turn)
+                        self.join_capture_needs_initial.discard(match_id)
+                        self.join_capture_saw_move_row.discard(match_id)
+                    self.board_buffers.pop(match_id, None)
+
             if parsed.warnings:
                 for warning in parsed.warnings:
                     state.add_warning(warning)
@@ -191,42 +238,58 @@ class Collector:
                     state.merge_snapshot_moves(parsed.moves)
                 else:
                     for move in parsed.moves:
+                        if move.ply is not None and move.ply > 0 and match_id in self.join_capture_needs_initial:
+                            self.join_capture_saw_move_row.add(match_id)
                         state.append_live_move(move)
 
             if parsed.result:
                 state.mark_terminal(parsed.result)
                 await self._finalise_match(state)
 
+        if parsed.closed_match_id:
+            await self._unwatch(parsed.closed_match_id)
+
+    @staticmethod
+    def _watch_root_id(match_id: str) -> str:
+        return match_id.split(".", 1)[0]
+
+    def _clear_capture_state(self, match_id: str) -> None:
+        self.board_buffers.pop(match_id, None)
+        self.join_capture_needs_initial.discard(match_id)
+        self.join_capture_saw_move_row.discard(match_id)
+
     async def _watch_match_if_needed(self, match_id: str) -> None:
-        if match_id in self.requested_watch_ids or match_id in self.watching_ids:
+        watch_id = self._watch_root_id(match_id)
+        if watch_id in self.requested_watch_ids or watch_id in self.watching_ids:
             return
         if len(self.watching_ids) >= self.args.max_watches:
             LOGGER.warning("max watches reached (%s), skip match %s", self.args.max_watches, match_id)
             return
-        self.requested_watch_ids.add(match_id)
-        state = self._get_or_create_match(match_id)
+        self.requested_watch_ids.add(watch_id)
+        state = self._get_or_create_match(watch_id)
         try:
-            await self.client.send_command(f"t /os watch + .{match_id}")
-            state.append_raw(f"SEND t /os watch + .{match_id}")
-            await self.client.send_command(f"t /os moves .{match_id}")
-            state.append_raw(f"SEND t /os moves .{match_id}")
+            await self.client.send_command(f"t /os watch + .{watch_id}")
+            state.append_raw(f"SEND t /os watch + .{watch_id}")
+            await self.client.send_command(f"t /os moves .{watch_id}")
+            state.append_raw(f"SEND t /os moves .{watch_id}")
             state.watching = True
-            self.watching_ids.add(match_id)
-            LOGGER.info("watching match .%s", match_id)
+            self.watching_ids.add(watch_id)
+            LOGGER.info("watching match .%s", watch_id)
         except Exception:
-            self.requested_watch_ids.discard(match_id)
-            LOGGER.exception("failed to start watching .%s", match_id)
+            self.requested_watch_ids.discard(watch_id)
+            LOGGER.exception("failed to start watching .%s", watch_id)
 
     async def _unwatch(self, match_id: str) -> None:
-        if match_id not in self.requested_watch_ids and match_id not in self.watching_ids:
+        watch_id = self._watch_root_id(match_id)
+        if watch_id not in self.requested_watch_ids and watch_id not in self.watching_ids:
             return
         if self.client.connected_event.is_set():
             try:
-                await self.client.send_command(f"t /os watch - .{match_id}")
+                await self.client.send_command(f"t /os watch - .{watch_id}")
             except Exception as exc:
-                LOGGER.warning("failed to unwatch .%s: %s", match_id, exc)
-        self.watching_ids.discard(match_id)
-        self.requested_watch_ids.discard(match_id)
+                LOGGER.warning("failed to unwatch .%s: %s", watch_id, exc)
+        self.watching_ids.discard(watch_id)
+        self.requested_watch_ids.discard(watch_id)
 
     async def _finalise_match(self, state: MatchState) -> None:
         if state.finalised:
@@ -264,10 +327,13 @@ class Collector:
 
         if state.parsed_result and state.parsed_result.margin is not None:
             board_diff = simulation.final_black_count - simulation.final_white_count
-            if board_diff != state.parsed_result.margin:
+            margin = state.parsed_result.margin
+            # GGSの表示はフォーマットにより「黒基準」または「先手名基準」の揺れがあるため、
+            # ここでは石差の絶対値整合を最低条件にする。
+            if abs(board_diff) != abs(margin):
                 await self._drop_match(
                     state,
-                    f"result_mismatch board_diff={board_diff} ggs={state.parsed_result.margin}",
+                    f"result_mismatch board_diff={board_diff} ggs={margin}",
                 )
                 return
 
@@ -279,7 +345,9 @@ class Collector:
             dry_run=self.args.dry_run,
         )
         LOGGER.info("saved match .%s -> %s", state.match_id, saved if saved else "(dry-run)")
-        await self._unwatch(state.match_id)
+        self._clear_capture_state(state.match_id)
+        if "." not in state.match_id:
+            await self._unwatch(state.match_id)
 
     def _detect_disqualifying_result(self, state: MatchState) -> Optional[str]:
         result = state.parsed_result
@@ -297,7 +365,9 @@ class Collector:
             reason=reason,
             dry_run=self.args.dry_run,
         )
-        await self._unwatch(state.match_id)
+        self._clear_capture_state(state.match_id)
+        if "." not in state.match_id:
+            await self._unwatch(state.match_id)
 
     async def _shutdown_active_matches(self) -> None:
         for match_id in list(self.watching_ids):
