@@ -27,7 +27,8 @@ def _initial_stone_count(board_64: str) -> int:
 
 
 def _write_text(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8", newline="\n")
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
 
 
 def save_completed_game(
@@ -141,4 +142,3 @@ def save_error_report(
     }
     _write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     return path
-
