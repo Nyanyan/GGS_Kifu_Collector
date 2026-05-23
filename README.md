@@ -25,7 +25,7 @@ python -m venv .venv
 pip install pytest
 ```
 
-Python 3.11+ を想定しています。
+Python 3.9+ を想定しています。
 
 ## Run
 
@@ -139,4 +139,3 @@ pytest -q
 ## Known limitation
 
 GGSの過去棋譜は `history` から復元できないため、**接続中に観戦できた対局のみ**収集できます。
-

@@ -20,7 +20,7 @@ def normalize_color(color: Optional[str]) -> Optional[str]:
     return None
 
 
-@dataclass(slots=True)
+@dataclass
 class MoveEvent:
     move: str
     color: Optional[str] = None
@@ -38,7 +38,7 @@ class MoveEvent:
         )
 
 
-@dataclass(slots=True)
+@dataclass
 class ParsedResult:
     raw: str
     margin: Optional[int] = None
@@ -60,7 +60,7 @@ class ParsedResult:
         return bool(self.flags & bad)
 
 
-@dataclass(slots=True)
+@dataclass
 class MatchListing:
     match_id: str
     black_player: Optional[str] = None
@@ -68,7 +68,7 @@ class MatchListing:
     game_type: Optional[str] = None
 
 
-@dataclass(slots=True)
+@dataclass
 class MatchState:
     match_id: str
     black_player: Optional[str] = None

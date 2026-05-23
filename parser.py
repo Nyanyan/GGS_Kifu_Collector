@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 from models import MatchListing, MoveEvent, ParsedResult, normalize_color
 
@@ -63,7 +63,7 @@ PLAIN_RESULT_KEYWORDS = {
 }
 
 
-@dataclass(slots=True)
+@dataclass
 class ParsedLine:
     match_ids: set[str] = field(default_factory=set)
     listings: list[MatchListing] = field(default_factory=list)
@@ -170,7 +170,7 @@ def _normalize_cell(cell: str) -> Optional[str]:
     return None
 
 
-def _parse_board_row(line: str) -> tuple[int, str] | None:
+def _parse_board_row(line: str) -> Optional[Tuple[int, str]]:
     parts = line.strip().split()
     # Example: | 1 - - - - - - - - 1
     if len(parts) != 11:
@@ -190,7 +190,7 @@ def _parse_board_row(line: str) -> tuple[int, str] | None:
     return int(parts[1]), "".join(cells)
 
 
-def _parse_update_move(line: str) -> MoveEvent | None:
+def _parse_update_move(line: str) -> Optional[MoveEvent]:
     found = MOVE_ROW_RE.search(line)
     if not found:
         return None

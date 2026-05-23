@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional, Tuple
 
 from models import normalize_color
 
@@ -65,12 +65,12 @@ def make_standard_initial_board_64() -> str:
     return "".join(board)
 
 
-@dataclass(slots=True)
+@dataclass
 class SimulationResult:
     is_valid: bool
     is_terminal: bool
-    terminated_by: str | None
-    reason: str | None
+    terminated_by: Optional[str]
+    reason: Optional[str]
     final_board_64: str
     final_black_count: int
     final_white_count: int
@@ -173,7 +173,7 @@ def _board_result_string(black: int, white: int) -> str:
     return "D"
 
 
-def _is_terminal_position(board: OthelloBoard) -> tuple[bool, str | None]:
+def _is_terminal_position(board: OthelloBoard) -> Tuple[bool, Optional[str]]:
     if board.is_full():
         return True, "board_full"
     if not board.can_move("black") and not board.can_move("white"):
