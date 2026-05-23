@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import socket
 from collections.abc import Callable
 from typing import Optional
 
@@ -68,15 +69,30 @@ class GGSClient:
             if writer is None:
                 raise ConnectionError("GGS writer is not ready")
             line = command.rstrip("\r\n")
-            writer.write((line + "\n").encode("utf-8"))
-            await writer.drain()
+            try:
+                writer.write((line + "\n").encode("utf-8"))
+                await writer.drain()
+            except (ConnectionError, OSError, RuntimeError) as exc:
+                self.connected_event.clear()
+                if self._writer is writer:
+                    self._writer = None
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+                raise ConnectionError(f"failed to send command: {exc}") from exc
             self.raw_sink("SEND", line)
 
     async def _run(self) -> None:
         backoff = 3
         while not self._stop_event.is_set():
             try:
-                reader, writer = await asyncio.open_connection(self.host, self.port)
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port),
+                    timeout=45,
+                )
+                self._enable_tcp_keepalive(writer)
                 self._writer = writer
                 await self._login(reader, writer)
                 self.connected_event.set()
@@ -106,6 +122,15 @@ class GGSClient:
             backoff = min(backoff * 2, 30)
 
         await self.status_queue.put(("stopped", "ok"))
+
+    def _enable_tcp_keepalive(self, writer: asyncio.StreamWriter) -> None:
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError as exc:
+            self.logger.debug("failed to enable TCP keepalive: %s", exc)
 
     async def _read_loop(self, reader: asyncio.StreamReader) -> None:
         while not self._stop_event.is_set():

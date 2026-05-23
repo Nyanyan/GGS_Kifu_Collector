@@ -51,6 +51,7 @@ class Collector:
         self.matches: dict[str, MatchState] = {}
         self.watching_ids: set[str] = set()
         self.requested_watch_ids: set[str] = set()
+        self.pending_resume_watch_ids: set[str] = set()
         self.current_context_match_id: Optional[str] = None
         self.board_buffers: dict[str, dict[int, str]] = {}
         self.join_capture_needs_initial: set[str] = set()
@@ -104,24 +105,44 @@ class Collector:
     async def _on_connected(self) -> None:
         await self.client.send_command("t /os vt100 -")
         await self.client.send_command("t /os client -")
+        await self._resume_pending_watches()
         if self.args.once and not self.first_match_poll_done:
             await self._poll_match_once()
+        elif not self.args.once:
+            await self._send_match_command()
 
     async def _on_disconnected(self, reason: str) -> None:
-        for match_id in list(self.watching_ids):
+        interrupted_ids = set(self.watching_ids) | set(self.requested_watch_ids)
+        if interrupted_ids:
+            LOGGER.warning(
+                "connection lost; will resume %s watched matches after reconnect",
+                len(interrupted_ids),
+            )
+        self.pending_resume_watch_ids.update(interrupted_ids)
+        for match_id in interrupted_ids:
             state = self.matches.get(match_id)
             if not state or state.finalised:
                 continue
-            await self._drop_match(state, f"connection_lost: {reason}")
+            state.watching = False
+            warning = f"connection_lost: {reason}"
+            if warning not in state.parser_warnings:
+                state.add_warning(warning)
+            self._clear_capture_state(match_id)
         self.watching_ids.clear()
         self.requested_watch_ids.clear()
+        self.current_context_match_id = None
+        self.match_window_deadline = None
 
     async def _poll_loop(self) -> None:
         if self.args.once:
             # onceモードは接続時に1回だけpollする。
             while not self.stop_event.is_set():
                 await asyncio.sleep(0.5)
-                if self.first_match_poll_done and not self.watching_ids:
+                if (
+                    self.first_match_poll_done
+                    and not self.watching_ids
+                    and not self.pending_resume_watch_ids
+                ):
                     self.stop_event.set()
                     return
             return
@@ -263,13 +284,26 @@ class Collector:
         self.join_capture_needs_initial.discard(match_id)
         self.join_capture_saw_move_row.discard(match_id)
 
-    async def _watch_match_if_needed(self, match_id: str) -> None:
+    async def _resume_pending_watches(self) -> None:
+        resumed = 0
+        for match_id in sorted(self.pending_resume_watch_ids):
+            state = self.matches.get(match_id)
+            if state and state.finalised:
+                self.pending_resume_watch_ids.discard(match_id)
+                continue
+            if await self._watch_match_if_needed(match_id):
+                self.pending_resume_watch_ids.discard(match_id)
+                resumed += 1
+        if resumed:
+            LOGGER.info("resumed %s watched matches after reconnect", resumed)
+
+    async def _watch_match_if_needed(self, match_id: str) -> bool:
         watch_id = self._watch_root_id(match_id)
         if watch_id in self.requested_watch_ids or watch_id in self.watching_ids:
-            return
+            return True
         if len(self.watching_ids) >= self.args.max_watches:
             LOGGER.warning("max watches reached (%s), skip match %s", self.args.max_watches, match_id)
-            return
+            return False
         self.requested_watch_ids.add(watch_id)
         state = self._get_or_create_match(watch_id)
         try:
@@ -280,21 +314,32 @@ class Collector:
             state.watching = True
             self.watching_ids.add(watch_id)
             LOGGER.info("watching match .%s", watch_id)
+            return True
         except Exception:
             self.requested_watch_ids.discard(watch_id)
             LOGGER.exception("failed to start watching .%s", watch_id)
+            return False
 
     async def _unwatch(self, match_id: str) -> None:
         watch_id = self._watch_root_id(match_id)
-        if watch_id not in self.requested_watch_ids and watch_id not in self.watching_ids:
+        if (
+            watch_id not in self.requested_watch_ids
+            and watch_id not in self.watching_ids
+            and watch_id not in self.pending_resume_watch_ids
+        ):
             return
-        if self.client.connected_event.is_set():
+        should_send = watch_id in self.requested_watch_ids or watch_id in self.watching_ids
+        if should_send and self.client.connected_event.is_set():
             try:
                 await self.client.send_command(f"t /os watch - .{watch_id}")
             except Exception as exc:
                 LOGGER.warning("failed to unwatch .%s: %s", watch_id, exc)
+        state = self.matches.get(watch_id)
+        if state:
+            state.watching = False
         self.watching_ids.discard(watch_id)
         self.requested_watch_ids.discard(watch_id)
+        self.pending_resume_watch_ids.discard(watch_id)
 
     async def _finalise_match(self, state: MatchState) -> None:
         if state.finalised:
@@ -380,7 +425,12 @@ class Collector:
             await self._unwatch(state.match_id)
 
     async def _shutdown_active_matches(self) -> None:
-        for match_id in list(self.watching_ids):
+        active_ids = (
+            set(self.watching_ids)
+            | set(self.requested_watch_ids)
+            | set(self.pending_resume_watch_ids)
+        )
+        for match_id in list(active_ids):
             state = self.matches.get(match_id)
             if state and not state.finalised:
                 save_error_report(
