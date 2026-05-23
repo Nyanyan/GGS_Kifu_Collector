@@ -139,3 +139,17 @@ pytest -q
 ## Known limitation
 
 GGSの過去棋譜は `history` から復元できないため、**接続中に観戦できた対局のみ**収集できます。
+
+## Additional Compact Batch Output
+
+In addition to per-match directories, the collector also writes a compact line format.
+
+- Directory: `<out-dir>/compact_batches/`
+- File name: save start timestamp (UTC), for example `20260523_120000.txt`
+- Max records per file: `10000` (then rotates to a new timestamped file)
+- Line format:
+  - `<initial_board_64> <X|O> <moves_compact>`
+  - Example:
+    - `------------------OOOO----OOXX---OXOXO----XXOO------O----------- X b4d7c7...`
+
+Only rule-verified terminal games are written. In `--dry-run` mode, compact files are not written.

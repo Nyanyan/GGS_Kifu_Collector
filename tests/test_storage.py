@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from models import MatchState
+from models import MatchState, MoveEvent
 from othello import SimulationResult
-from storage import save_completed_game
+from storage import CompactBatchWriter, save_completed_game
 
 
 def _simulation_stub(final_board_64: str) -> SimulationResult:
@@ -93,3 +93,45 @@ def test_saved_into_stones_14(tmp_path: Path) -> None:
     assert saved is not None
     assert saved.parent.name == "stones_14"
 
+
+def test_compact_batch_writer_and_rotation(tmp_path: Path) -> None:
+    writer = CompactBatchWriter(tmp_path / "compact_batches", max_records_per_file=2)
+
+    state1 = MatchState(
+        match_id="1",
+        initial_board_64=_build_board(7, 7),
+        initial_turn="black",
+    )
+    state1.append_live_move(MoveEvent(move="b4", color="black", ply=1))
+    state1.append_live_move(MoveEvent(move="d7", color="white", ply=2))
+
+    state2 = MatchState(
+        match_id="2",
+        initial_board_64=_build_board(8, 6),
+        initial_turn="white",
+    )
+    state2.append_live_move(MoveEvent(move="c7", color="white", ply=1))
+
+    state3 = MatchState(
+        match_id="3",
+        initial_board_64=_build_board(9, 5),
+        initial_turn="black",
+    )
+    state3.append_live_move(MoveEvent(move="a1", color="black", ply=1))
+
+    file_a = writer.append_record(state1)
+    file_b = writer.append_record(state2)
+    file_c = writer.append_record(state3)
+    writer.close()
+
+    assert file_a == file_b
+    assert file_c != file_a
+
+    lines_a = file_a.read_text(encoding="utf-8").splitlines()
+    lines_c = file_c.read_text(encoding="utf-8").splitlines()
+
+    assert len(lines_a) == 2
+    assert len(lines_c) == 1
+    assert lines_a[0].endswith(" X b4d7")
+    assert lines_a[1].endswith(" O c7")
+    assert lines_c[0].endswith(" X a1")

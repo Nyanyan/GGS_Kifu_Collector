@@ -14,7 +14,7 @@ from ggs_client import GGSClient
 from models import MatchState
 from othello import make_standard_initial_board_64, simulate_game
 from ggs_parser import is_standard_like_game_type, parse_stream_line
-from storage import save_completed_game, save_error_report
+from storage import CompactBatchWriter, save_completed_game, save_error_report
 
 LOGGER = logging.getLogger("ggs_othello_collector")
 
@@ -43,6 +43,10 @@ class Collector:
         self.out_dir = Path(args.out_dir)
         self.errors_dir = Path("errors")
         self.raw_logger = SessionRawLogger(Path(args.raw_log_dir))
+        self.compact_batch_writer = CompactBatchWriter(
+            out_dir=self.out_dir / "compact_batches",
+            max_records_per_file=10000,
+        )
 
         self.matches: dict[str, MatchState] = {}
         self.watching_ids: set[str] = set()
@@ -80,6 +84,7 @@ class Collector:
             await asyncio.gather(*tasks, return_exceptions=True)
             await self._shutdown_active_matches()
             await self.client.stop()
+            self.compact_batch_writer.close()
             self.raw_logger.close()
 
     async def _status_loop(self) -> None:
@@ -344,7 +349,12 @@ class Collector:
             raw_log_file=self.raw_logger.path,
             dry_run=self.args.dry_run,
         )
+        compact_saved = None
+        if not self.args.dry_run:
+            compact_saved = self.compact_batch_writer.append_record(state)
         LOGGER.info("saved match .%s -> %s", state.match_id, saved if saved else "(dry-run)")
+        if compact_saved:
+            LOGGER.info("appended compact record .%s -> %s", state.match_id, compact_saved)
         self._clear_capture_state(state.match_id)
         if "." not in state.match_id:
             await self._unwatch(state.match_id)

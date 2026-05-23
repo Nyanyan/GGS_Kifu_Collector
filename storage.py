@@ -6,7 +6,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 from models import MatchState
 from othello import SimulationResult
@@ -29,6 +29,10 @@ def _initial_stone_count(board_64: str) -> int:
 def _write_text(path: Path, content: str) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(content)
+
+
+def _turn_marker(turn: str) -> str:
+    return "X" if turn == "black" else "O"
 
 
 def save_completed_game(
@@ -111,6 +115,69 @@ def save_completed_game(
     # 同一ファイルシステム上のrenameで原子的に公開する。
     os.replace(temp_dir, final_dir)
     return final_dir
+
+
+class CompactBatchWriter:
+    def __init__(self, out_dir: Path, max_records_per_file: int = 10000) -> None:
+        if max_records_per_file <= 0:
+            raise ValueError("max_records_per_file must be > 0")
+        self.out_dir = out_dir
+        self.max_records_per_file = max_records_per_file
+        self._path: Optional[Path] = None
+        self._fh: Optional[TextIO] = None
+        self._count = 0
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def current_path(self) -> Optional[Path]:
+        return self._path
+
+    def append_record(self, state: MatchState) -> Path:
+        if not state.initial_board_64:
+            raise ValueError("state.initial_board_64 is required")
+        if self._fh is None or self._count >= self.max_records_per_file:
+            self._open_new_file()
+
+        marker = _turn_marker(state.initial_turn_or_default)
+        compact = "".join(move for move in state.moves if move != "pass")
+        line = f"{state.initial_board_64} {marker} {compact}\n"
+
+        assert self._fh is not None
+        self._fh.write(line)
+        self._fh.flush()
+        self._count += 1
+
+        assert self._path is not None
+        return self._path
+
+    def close(self) -> None:
+        if self._fh:
+            self._fh.flush()
+            self._fh.close()
+        self._fh = None
+        self._path = None
+        self._count = 0
+
+    def _open_new_file(self) -> None:
+        if self._fh:
+            self._fh.flush()
+            self._fh.close()
+        self._path = self._new_path()
+        self._fh = self._path.open("a", encoding="utf-8", newline="\n")
+        self._count = 0
+
+    def _new_path(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        base = self.out_dir / f"{timestamp}.txt"
+        if not base.exists():
+            return base
+
+        suffix = 1
+        while True:
+            candidate = self.out_dir / f"{timestamp}_{suffix:02d}.txt"
+            if not candidate.exists():
+                return candidate
+            suffix += 1
 
 
 def save_error_report(
