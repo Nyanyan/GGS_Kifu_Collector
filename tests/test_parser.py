@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from parser import parse_stream_line
+from ggs_parser import parse_stream_line
 
 
 def test_ggf_tokens_parse() -> None:

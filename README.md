@@ -11,7 +11,7 @@ GGS（Generic Game Server）のOthelloサービス `/os` に常時接続し、�
 
 - `ggs_othello_collector.py`: メインCLI（常駐収集）
 - `ggs_client.py`: TCP接続、ログイン、再接続、送受信
-- `parser.py`: GGS/GGF行パース
+- `ggs_parser.py`: GGS/GGF行パース
 - `othello.py`: 8x8 Othello合法手検証と盤面更新
 - `storage.py`: 正常終局記録・エラーログ保存
 - `models.py`: dataclass定義

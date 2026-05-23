@@ -13,7 +13,7 @@ from typing import Optional
 from ggs_client import GGSClient
 from models import MatchState
 from othello import make_standard_initial_board_64, simulate_game
-from parser import is_standard_like_game_type, parse_stream_line
+from ggs_parser import is_standard_like_game_type, parse_stream_line
 from storage import save_completed_game, save_error_report
 
 LOGGER = logging.getLogger("ggs_othello_collector")
