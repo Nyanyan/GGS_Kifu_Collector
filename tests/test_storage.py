@@ -32,11 +32,11 @@ def _simulation_stub(final_board_64: str) -> SimulationResult:
 
 def _build_board(x_count: int, o_count: int) -> str:
     if x_count + o_count > 64:
-        raise ValueError("too many stones")
+        raise ValueError("too many discs")
     return "X" * x_count + "O" * o_count + "-" * (64 - x_count - o_count)
 
 
-def test_saved_into_stones_04_and_atomic_rename(tmp_path: Path) -> None:
+def test_saved_into_discs_04_and_atomic_rename(tmp_path: Path) -> None:
     out_dir = tmp_path / "records"
     state = MatchState(
         match_id="11111",
@@ -66,14 +66,14 @@ def test_saved_into_stones_04_and_atomic_rename(tmp_path: Path) -> None:
         dry_run=False,
     )
     assert saved is not None
-    assert saved.parent.name == "stones_04"
+    assert saved.parent.name == "discs_04"
     assert (saved / "record.txt").exists()
     assert (saved / "metadata.json").exists()
     assert (saved / "raw.txt").exists()
     assert not list(out_dir.rglob("*.tmp"))
 
 
-def test_saved_into_stones_14(tmp_path: Path) -> None:
+def test_saved_into_discs_14(tmp_path: Path) -> None:
     out_dir = tmp_path / "records"
     state = MatchState(
         match_id="22222",
@@ -91,7 +91,7 @@ def test_saved_into_stones_14(tmp_path: Path) -> None:
         dry_run=False,
     )
     assert saved is not None
-    assert saved.parent.name == "stones_14"
+    assert saved.parent.name == "discs_14"
 
 
 def test_compact_batch_writer_and_rotation(tmp_path: Path) -> None:
@@ -119,19 +119,33 @@ def test_compact_batch_writer_and_rotation(tmp_path: Path) -> None:
     )
     state3.append_live_move(MoveEvent(move="a1", color="black", ply=1))
 
+    state4 = MatchState(
+        match_id="4",
+        initial_board_64=_build_board(9, 7),
+        initial_turn="black",
+    )
+    state4.append_live_move(MoveEvent(move="h8", color="black", ply=1))
+
     file_a = writer.append_record(state1)
     file_b = writer.append_record(state2)
     file_c = writer.append_record(state3)
+    file_d = writer.append_record(state4)
     writer.close()
 
     assert file_a == file_b
     assert file_c != file_a
+    assert file_a.parent.name == "discs_14"
+    assert file_c.parent.name == "discs_14"
+    assert file_d.parent.name == "discs_16"
 
     lines_a = file_a.read_text(encoding="utf-8").splitlines()
     lines_c = file_c.read_text(encoding="utf-8").splitlines()
+    lines_d = file_d.read_text(encoding="utf-8").splitlines()
 
     assert len(lines_a) == 2
     assert len(lines_c) == 1
+    assert len(lines_d) == 1
     assert lines_a[0].endswith(" X b4d7")
     assert lines_a[1].endswith(" O c7")
     assert lines_c[0].endswith(" X a1")
+    assert lines_d[0].endswith(" X h8")

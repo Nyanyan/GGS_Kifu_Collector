@@ -6,7 +6,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Dict, Optional, TextIO
 
 from models import MatchState
 from othello import SimulationResult
@@ -22,7 +22,7 @@ def _timestamp_for_path(moment: Optional[datetime]) -> str:
     return dt.strftime("%Y%m%d_%H%M%S")
 
 
-def _initial_stone_count(board_64: str) -> int:
+def _initial_disc_count(board_64: str) -> int:
     return sum(1 for cell in board_64 if cell in {"X", "O"})
 
 
@@ -49,19 +49,19 @@ def save_completed_game(
         raise ValueError("state.initial_board_64 is required")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    stones = _initial_stone_count(state.initial_board_64)
-    stones_dir = out_dir / f"stones_{stones:02d}"
-    stones_dir.mkdir(parents=True, exist_ok=True)
+    disc_count = _initial_disc_count(state.initial_board_64)
+    discs_dir = out_dir / f"discs_{disc_count:02d}"
+    discs_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = _timestamp_for_path(state.end_time or state.start_time)
     black = _safe_name(state.black_player or "black")
     white = _safe_name(state.white_player or "white")
     base_name = f"{timestamp}_{state.match_id}_{black}_vs_{white}"
 
-    final_dir = stones_dir / base_name
+    final_dir = discs_dir / base_name
     suffix = 1
     while final_dir.exists():
-        final_dir = stones_dir / f"{base_name}_{suffix}"
+        final_dir = discs_dir / f"{base_name}_{suffix}"
         suffix += 1
 
     temp_dir = final_dir.with_name(final_dir.name + ".tmp")
@@ -90,7 +90,7 @@ def save_completed_game(
         "game_type": state.game_type,
         "start_time": (state.start_time or datetime.now(timezone.utc)).isoformat(),
         "end_time": (state.end_time or datetime.now(timezone.utc)).isoformat(),
-        "initial_stone_count": stones,
+        "initial_disc_count": disc_count,
         "initial_board_64": state.initial_board_64,
         "initial_turn": state.initial_turn_or_default,
         "moves": moves,
@@ -112,7 +112,7 @@ def save_completed_game(
     raw_content = "\n".join(state.raw_lines) + ("\n" if state.raw_lines else "")
     _write_text(temp_dir / "raw.txt", raw_content)
 
-    # 同一ファイルシステム上のrenameで原子的に公開する。
+    # Finalize atomically after all files are written.
     os.replace(temp_dir, final_dir)
     return final_dir
 
@@ -123,58 +123,71 @@ class CompactBatchWriter:
             raise ValueError("max_records_per_file must be > 0")
         self.out_dir = out_dir
         self.max_records_per_file = max_records_per_file
-        self._path: Optional[Path] = None
-        self._fh: Optional[TextIO] = None
-        self._count = 0
+        self._paths: Dict[int, Path] = {}
+        self._files: Dict[int, TextIO] = {}
+        self._counts: Dict[int, int] = {}
+        self._last_path: Optional[Path] = None
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def current_path(self) -> Optional[Path]:
-        return self._path
+        return self._last_path
 
     def append_record(self, state: MatchState) -> Path:
         if not state.initial_board_64:
             raise ValueError("state.initial_board_64 is required")
-        if self._fh is None or self._count >= self.max_records_per_file:
-            self._open_new_file()
+
+        disc_count = _initial_disc_count(state.initial_board_64)
+        if (
+            disc_count not in self._files
+            or self._counts.get(disc_count, 0) >= self.max_records_per_file
+        ):
+            self._open_new_file(disc_count)
 
         marker = _turn_marker(state.initial_turn_or_default)
         compact = "".join(move for move in state.moves if move != "pass")
         line = f"{state.initial_board_64} {marker} {compact}\n"
 
-        assert self._fh is not None
-        self._fh.write(line)
-        self._fh.flush()
-        self._count += 1
+        handle = self._files[disc_count]
+        handle.write(line)
+        handle.flush()
+        self._counts[disc_count] = self._counts.get(disc_count, 0) + 1
 
-        assert self._path is not None
-        return self._path
+        path = self._paths[disc_count]
+        self._last_path = path
+        return path
 
     def close(self) -> None:
-        if self._fh:
-            self._fh.flush()
-            self._fh.close()
-        self._fh = None
-        self._path = None
-        self._count = 0
+        for handle in self._files.values():
+            handle.flush()
+            handle.close()
+        self._files = {}
+        self._paths = {}
+        self._counts = {}
+        self._last_path = None
 
-    def _open_new_file(self) -> None:
-        if self._fh:
-            self._fh.flush()
-            self._fh.close()
-        self._path = self._new_path()
-        self._fh = self._path.open("a", encoding="utf-8", newline="\n")
-        self._count = 0
+    def _open_new_file(self, disc_count: int) -> None:
+        if disc_count in self._files:
+            self._files[disc_count].flush()
+            self._files[disc_count].close()
 
-    def _new_path(self) -> Path:
+        discs_dir = self.out_dir / f"discs_{disc_count:02d}"
+        discs_dir.mkdir(parents=True, exist_ok=True)
+        path = self._new_path(discs_dir)
+        self._paths[disc_count] = path
+        self._files[disc_count] = path.open("a", encoding="utf-8", newline="\n")
+        self._counts[disc_count] = 0
+        self._last_path = path
+
+    def _new_path(self, target_dir: Path) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        base = self.out_dir / f"{timestamp}.txt"
+        base = target_dir / f"{timestamp}.txt"
         if not base.exists():
             return base
 
         suffix = 1
         while True:
-            candidate = self.out_dir / f"{timestamp}_{suffix:02d}.txt"
+            candidate = target_dir / f"{timestamp}_{suffix:02d}.txt"
             if not candidate.exists():
                 return candidate
             suffix += 1
