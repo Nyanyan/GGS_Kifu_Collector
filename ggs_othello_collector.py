@@ -185,6 +185,10 @@ class Collector:
 
     async def _handle_line(self, line: str) -> None:
         parsed = parse_stream_line(line)
+        if parsed.watch_failed_match_id:
+            self._mark_watch_failed(parsed.watch_failed_match_id, line)
+            return
+
         if parsed.context_match_id:
             self.current_context_match_id = parsed.context_match_id
             if parsed.context_kind == "join":
@@ -201,7 +205,7 @@ class Collector:
             )
 
         if self._in_match_window():
-            for match_id in parsed.match_ids:
+            for match_id in parsed.watch_match_ids:
                 await self._watch_match_if_needed(match_id)
 
         target_ids = set(parsed.match_ids)
@@ -283,6 +287,27 @@ class Collector:
         self.board_buffers.pop(match_id, None)
         self.join_capture_needs_initial.discard(match_id)
         self.join_capture_saw_move_row.discard(match_id)
+
+    def _mark_watch_failed(self, match_id: str, line: str) -> None:
+        watch_id = self._watch_root_id(match_id)
+        was_active = (
+            watch_id in self.requested_watch_ids
+            or watch_id in self.watching_ids
+            or watch_id in self.pending_resume_watch_ids
+        )
+        state = self.matches.get(watch_id)
+        if state and not state.finalised:
+            state.append_raw(line)
+            state.watching = False
+            warning = f"watch_failed: {line.strip()}"
+            if warning not in state.parser_warnings:
+                state.add_warning(warning)
+        self.watching_ids.discard(watch_id)
+        self.requested_watch_ids.discard(watch_id)
+        self.pending_resume_watch_ids.discard(watch_id)
+        self._clear_capture_state(watch_id)
+        if was_active:
+            LOGGER.warning("watch failed for .%s; removed from active watches", watch_id)
 
     async def _resume_pending_watches(self) -> None:
         resumed = 0

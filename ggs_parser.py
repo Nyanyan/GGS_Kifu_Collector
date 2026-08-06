@@ -41,6 +41,14 @@ END_RE = re.compile(
     re.IGNORECASE,
 )
 MATCH_CLOSED_RE = re.compile(r"^/os:\s*-\s*match\s+\.(?P<id>\d+)\b", re.IGNORECASE)
+WATCH_NOT_FOUND_RE = re.compile(
+    r"^/os:\s*watch\s+\+\s+ERR\s+not\s+found:\s+\.(?P<id>\d+)\b",
+    re.IGNORECASE,
+)
+MATCH_NOT_FOUND_RE = re.compile(
+    r"^/os:\s*ERR\s+match\s+['\"]?\.(?P<id>\d+)['\"]?\s+not\s+found\.?",
+    re.IGNORECASE,
+)
 MOVE_ROW_RE = re.compile(
     r"^\|\s*(?P<ply>\d+)\s*:\s*(?P<move>[A-Za-z0-9]+)(?:/.*)?$",
     re.IGNORECASE,
@@ -66,6 +74,7 @@ PLAIN_RESULT_KEYWORDS = {
 @dataclass
 class ParsedLine:
     match_ids: set[str] = field(default_factory=set)
+    watch_match_ids: set[str] = field(default_factory=set)
     listings: list[MatchListing] = field(default_factory=list)
     game_type: Optional[str] = None
     initial_board_64: Optional[str] = None
@@ -77,6 +86,7 @@ class ParsedLine:
     context_match_id: Optional[str] = None
     context_kind: Optional[str] = None
     closed_match_id: Optional[str] = None
+    watch_failed_match_id: Optional[str] = None
     board_row_index: Optional[int] = None
     board_row_8: Optional[str] = None
     move_count_hint: Optional[int] = None
@@ -254,7 +264,15 @@ def parse_stream_line(line: str) -> ParsedLine:
 
     closed = MATCH_CLOSED_RE.search(line)
     if closed:
-        parsed.closed_match_id = normalize_match_id(closed.group("id"))
+        closed_match_id = normalize_match_id(closed.group("id"))
+        parsed.closed_match_id = closed_match_id
+        # A closed-match line ends with a saved record id such as ".83353".
+        # That id is not a live match and must not be treated as watchable.
+        parsed.match_ids = {closed_match_id}
+
+    watch_failed = WATCH_NOT_FOUND_RE.search(line) or MATCH_NOT_FOUND_RE.search(line)
+    if watch_failed:
+        parsed.watch_failed_match_id = normalize_match_id(watch_failed.group("id"))
 
     side = SIDE_TO_MOVE_RE.search(line)
     if side:
@@ -268,6 +286,7 @@ def parse_stream_line(line: str) -> ParsedLine:
     if row:
         match_id = normalize_match_id(row.group("id"))
         parsed.match_ids.add(match_id)
+        parsed.watch_match_ids.add(match_id)
         parsed.listings.append(
             MatchListing(
                 match_id=match_id,

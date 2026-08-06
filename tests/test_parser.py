@@ -30,6 +30,7 @@ def test_match_row_parsing_single_digit_id() -> None:
     line = "|  .2 2664 nyanyan  2562 egrcd       s8r14  R 0"
     parsed = parse_stream_line(line)
     assert "2" in parsed.match_ids
+    assert parsed.watch_match_ids == {"2"}
     assert parsed.listings
     listing = parsed.listings[0]
     assert listing.match_id == "2"
@@ -70,3 +71,21 @@ def test_update_end_and_board_parsing() -> None:
     assert ended.context_kind == "end"
     assert ended.result is not None
     assert ended.result.margin == 2
+
+
+def test_closed_match_line_does_not_expose_saved_record_id_as_live_match() -> None:
+    parsed = parse_stream_line(
+        "/os: - match .65 2628 nyanyan 2616 egrcd s8r14 R +0.00  .83353"
+    )
+
+    assert parsed.closed_match_id == "65"
+    assert parsed.match_ids == {"65"}
+    assert parsed.watch_match_ids == set()
+
+
+def test_watch_not_found_parsing() -> None:
+    watch_error = parse_stream_line("/os: watch + ERR not found: .83353")
+    assert watch_error.watch_failed_match_id == "83353"
+
+    moves_error = parse_stream_line("/os: ERR match '.65' not found.")
+    assert moves_error.watch_failed_match_id == "65"
