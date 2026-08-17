@@ -157,3 +157,83 @@ async def _test_watch_not_found_clears_active_watch_state(tmp_path: Path) -> Non
         ]
     finally:
         _close_collector(collector)
+
+
+def test_reused_match_id_resets_finalised_family_on_new_listing(tmp_path: Path) -> None:
+    asyncio.run(_test_reused_match_id_resets_finalised_family_on_new_listing(tmp_path))
+
+
+async def _test_reused_match_id_resets_finalised_family_on_new_listing(tmp_path: Path) -> None:
+    collector = _make_collector(tmp_path)
+    try:
+        client = RecordingClient()
+        collector.client = client  # type: ignore[assignment]
+        old_root = MatchState(match_id="57")
+        old_child = MatchState(match_id="57.0")
+        old_child.finalised = True
+        old_child.raw_lines.append("old finished game")
+        collector.matches["57"] = old_root
+        collector.matches["57.0"] = old_child
+        collector.board_buffers["57.0"] = {1: "--------"}
+        collector.current_context_match_id = "57.0"
+        collector.match_window_deadline = datetime.now(timezone.utc) + timedelta(seconds=6)
+
+        await collector._handle_line("| .57 2690 Rhapsody  2371 kuroobi     s8r14  R 0")
+
+        assert client.commands == ["t /os watch + .57", "t /os moves .57"]
+        assert collector.watching_ids == {"57"}
+        assert collector.requested_watch_ids == {"57"}
+        assert collector.current_context_match_id is None
+        assert "57.0" not in collector.matches
+        assert "57.0" not in collector.board_buffers
+        assert collector.matches["57"] is not old_root
+    finally:
+        _close_collector(collector)
+
+
+def test_resume_pending_watch_preserves_interrupted_family(tmp_path: Path) -> None:
+    asyncio.run(_test_resume_pending_watch_preserves_interrupted_family(tmp_path))
+
+
+async def _test_resume_pending_watch_preserves_interrupted_family(tmp_path: Path) -> None:
+    collector = _make_collector(tmp_path)
+    try:
+        client = RecordingClient()
+        collector.client = client  # type: ignore[assignment]
+        interrupted_child = MatchState(match_id="57.0")
+        interrupted_child.raw_lines.append("partial game")
+        collector.matches["57.0"] = interrupted_child
+        collector.pending_resume_watch_ids.add("57")
+
+        await collector._resume_pending_watches()
+
+        assert client.commands == ["t /os watch + .57", "t /os moves .57"]
+        assert collector.pending_resume_watch_ids == set()
+        assert collector.watching_ids == {"57"}
+        assert collector.matches["57.0"] is interrupted_child
+    finally:
+        _close_collector(collector)
+
+
+def test_join_replaces_finalised_child_even_when_root_is_active(tmp_path: Path) -> None:
+    asyncio.run(_test_join_replaces_finalised_child_even_when_root_is_active(tmp_path))
+
+
+async def _test_join_replaces_finalised_child_even_when_root_is_active(tmp_path: Path) -> None:
+    collector = _make_collector(tmp_path)
+    try:
+        old_child = MatchState(match_id="57.0")
+        old_child.finalised = True
+        old_child.raw_lines.append("old finished game")
+        collector.matches["57.0"] = old_child
+        collector.watching_ids.add("57")
+        collector.board_buffers["57.0"] = {1: "--------"}
+
+        await collector._handle_line("/os: join .57.0 s8r14 K?")
+
+        assert collector.matches["57.0"] is not old_child
+        assert not collector.matches["57.0"].finalised
+        assert collector.matches["57.0"].raw_lines == ["/os: join .57.0 s8r14 K?"]
+        assert "57.0" not in collector.board_buffers
+    finally:
+        _close_collector(collector)

@@ -189,6 +189,12 @@ class Collector:
             self._mark_watch_failed(parsed.watch_failed_match_id, line)
             return
 
+        if parsed.context_match_id and parsed.context_kind == "join":
+            existing = self.matches.get(parsed.context_match_id)
+            if existing and existing.finalised:
+                self._clear_capture_state(parsed.context_match_id)
+                self.matches.pop(parsed.context_match_id, None)
+
         if parsed.context_match_id:
             self.current_context_match_id = parsed.context_match_id
             if parsed.context_kind == "join":
@@ -316,19 +322,39 @@ class Collector:
             if state and state.finalised:
                 self.pending_resume_watch_ids.discard(match_id)
                 continue
-            if await self._watch_match_if_needed(match_id):
+            if await self._watch_match_if_needed(match_id, reset_existing=False):
                 self.pending_resume_watch_ids.discard(match_id)
                 resumed += 1
         if resumed:
             LOGGER.info("resumed %s watched matches after reconnect", resumed)
 
-    async def _watch_match_if_needed(self, match_id: str) -> bool:
+    def _reset_match_family(self, watch_id: str) -> None:
+        prefix = f"{watch_id}."
+        stale_ids = [
+            match_id
+            for match_id in self.matches
+            if match_id == watch_id or match_id.startswith(prefix)
+        ]
+        for stale_id in stale_ids:
+            self._clear_capture_state(stale_id)
+            self.matches.pop(stale_id, None)
+        if self.current_context_match_id and (
+            self.current_context_match_id == watch_id
+            or self.current_context_match_id.startswith(prefix)
+        ):
+            self.current_context_match_id = None
+        if stale_ids:
+            LOGGER.debug("reset %s stale state(s) for reused match .%s", len(stale_ids), watch_id)
+
+    async def _watch_match_if_needed(self, match_id: str, *, reset_existing: bool = True) -> bool:
         watch_id = self._watch_root_id(match_id)
         if watch_id in self.requested_watch_ids or watch_id in self.watching_ids:
             return True
         if len(self.watching_ids) >= self.args.max_watches:
             LOGGER.warning("max watches reached (%s), skip match %s", self.args.max_watches, match_id)
             return False
+        if reset_existing:
+            self._reset_match_family(watch_id)
         self.requested_watch_ids.add(watch_id)
         state = self._get_or_create_match(watch_id)
         try:
